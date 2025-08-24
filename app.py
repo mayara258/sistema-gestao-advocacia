@@ -1,0 +1,716 @@
+import streamlit as st
+import psycopg2
+from datetime import date, timedelta
+from fpdf import FPDF
+import base64
+from passlib.context import CryptContext
+
+# Estilo CSS para aprimorar a estética do menu
+st.markdown("""
+<style>
+    .stButton > button {
+        width: 100%;
+        height: 100px;
+        font-size: 1.2rem;
+        border-radius: 10px;
+        border: 2px solid #D3D3D3;
+        color: #FFFFFF;
+        background-color: #4CAF50;
+        transition: all 0.3s ease;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.2);
+    }
+    .stButton > button:hover {
+        background-color: #45a049;
+        border-color: #4CAF50;
+        box-shadow: 2px 2px 10px rgba(0,0,0,0.3);
+    }
+    h1, h2, h3 {
+        color: #333;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    .st-bu {
+        background-color: #f0f2f6;
+        border-radius: 10px;
+        padding: 20px;
+        margin-bottom: 20px;
+        border: 1px solid #e0e0e0;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# COLOQUE SUA URL EXTERNA DO BANCO DE DADOS AQUI.
+# Ela deve ser copiada diretamente do painel do Render.
+DATABASE_URL = "postgresql://escritorio_bd_user:lhoQGcIxFGHZzvgSDGksJAdeTuvpW2Hw@dpg-d2kemap5pdvs739huavg-a.oregon-postgres.render.com/escritorio_bd"
+
+# Caminho para o arquivo do logo
+# CERTIFIQUE-SE DE QUE ESTE ARQUIVO ESTÁ NA MESMA PASTA DO app.py
+LOGO_PATH = "LOGO lUNA ALENCAR.png"
+
+# Contexto para o hash de senhas
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def create_connection():
+    """Cria e retorna uma conexão com o banco de dados."""
+    conn = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except psycopg2.Error as e:
+        st.error(f"Erro ao conectar ao banco de dados: {e}")
+        return None
+
+# --- Funções de Autenticação e Usuários ---
+
+def hash_password(password):
+    """Gera um hash para a senha."""
+    return pwd_context.hash(password)
+
+def verify_password(plain_password, hashed_password):
+    """Verifica se a senha em texto simples corresponde ao hash."""
+    return pwd_context.verify(plain_password, hashed_password)
+
+def register_user(username, password, role="user"):
+    """Salva um novo usuário no banco de dados."""
+    conn = create_connection()
+    if conn is not None:
+        try:
+            cur = conn.cursor()
+            hashed_password = hash_password(password)
+            insert_query = "INSERT INTO users (username, password_hash, role) VALUES (%s, %s, %s);"
+            cur.execute(insert_query, (username, hashed_password, role))
+            conn.commit()
+            st.success(f"Usuário '{username}' cadastrado com sucesso!")
+            return True
+        except psycopg2.Error as e:
+            st.error(f"Erro ao cadastrar usuário: {e}")
+            return False
+        finally:
+            conn.close()
+    return False
+
+def get_user(username):
+    """Busca um usuário no banco de dados."""
+    conn = create_connection()
+    user = None
+    if conn is not None:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id, username, password_hash, role FROM users WHERE username = %s;", (username,))
+            user = cur.fetchone()
+        finally:
+            conn.close()
+    return user
+
+def update_password(username, new_password):
+    """Altera a senha de um usuário."""
+    conn = create_connection()
+    if conn is not None:
+        try:
+            cur = conn.cursor()
+            new_hashed_password = hash_password(new_password)
+            update_query = "UPDATE users SET password_hash = %s WHERE username = %s;"
+            cur.execute(update_query, (new_hashed_password, username))
+            conn.commit()
+            st.success("Senha alterada com sucesso!")
+            return True
+        except psycopg2.Error as e:
+            st.error(f"Erro ao alterar senha: {e}")
+            return False
+        finally:
+            conn.close()
+    return False
+
+def create_users_table_if_not_exists(conn):
+    """Cria a tabela de usuários se ela não existir e insere um usuário admin padrão."""
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role VARCHAR(20) NOT NULL
+            );
+        """)
+        
+        cur.execute("SELECT COUNT(*) FROM users WHERE username = 'admin';")
+        if cur.fetchone()[0] == 0:
+            hashed_password = hash_password("admin123")
+            cur.execute("INSERT INTO users (username, password_hash, role) VALUES (%s, %s, %s);", ('admin', hashed_password, 'admin'))
+        
+        conn.commit()
+    except psycopg2.Error as e:
+        st.error(f"Erro ao inicializar a tabela de usuários: {e}")
+        conn.rollback()
+    finally:
+        cur.close()
+
+
+def create_initial_tables(conn):
+    """Cria as tabelas do projeto se elas ainda não existirem."""
+    commands = (
+        """
+        CREATE TABLE IF NOT EXISTS clientes (
+            id_cliente SERIAL PRIMARY KEY,
+            nome_cliente VARCHAR(255) NOT NULL,
+            cpf_cnpj VARCHAR(20) UNIQUE NOT NULL,
+            telefone VARCHAR(20),
+            endereco VARCHAR(255),
+            informacoes_adicionais TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS contratos (
+            id_contrato SERIAL PRIMARY KEY,
+            id_cliente INTEGER REFERENCES clientes (id_cliente) ON DELETE CASCADE,
+            descricao_servico TEXT NOT NULL,
+            tipo_contrato VARCHAR(20) NOT NULL,
+            valor_total_servico NUMERIC(10, 2),
+            valor_entrada NUMERIC(10, 2),
+            valor_parcela NUMERIC(10, 2),
+            data_inicio DATE
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS parcelas (
+            id_parcela SERIAL PRIMARY KEY,
+            id_contrato INTEGER REFERENCES contratos (id_contrato) ON DELETE CASCADE,
+            valor_parcela NUMERIC(10, 2) NOT NULL,
+            data_vencimento DATE NOT NULL,
+            status_pagamento VARCHAR(20) NOT NULL,
+            forma_pagamento VARCHAR(50),
+            comprovante_anexo TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS fluxo_caixa (
+            id_transacao SERIAL PRIMARY KEY,
+            tipo_movimentacao VARCHAR(10) NOT NULL, -- 'entrada' ou 'saida'
+            valor NUMERIC(10, 2) NOT NULL,
+            descricao TEXT NOT NULL,
+            data_movimentacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+
+    if conn is not None:
+        try:
+            cur = conn.cursor()
+            for command in commands:
+                cur.execute(command)
+            conn.commit()
+            create_users_table_if_not_exists(conn)
+        except psycopg2.Error as e:
+            st.error(f"Erro ao criar tabelas: {e}")
+        finally:
+            cur.close()
+
+# --- Funções do Sistema ---
+def get_user_info_by_parcela(id_parcela):
+    conn = create_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            query = """
+            SELECT c.nome_cliente, co.descricao_servico FROM parcelas AS p
+            JOIN contratos AS co ON p.id_contrato = co.id_contrato
+            JOIN clientes AS c ON co.id_cliente = c.id_cliente WHERE p.id_parcela = %s;
+            """
+            cur.execute(query, (id_parcela,))
+            return cur.fetchone()
+        finally:
+            conn.close()
+    return None
+
+def mark_as_paid(id_parcela, forma_pagamento, comprovante_anexo, valor_parcela, username):
+    """Atualiza o status de uma parcela para 'Pago' e registra o pagamento."""
+    conn = create_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            update_query = """
+            UPDATE parcelas SET status_pagamento = 'Pago', data_pagamento = %s, forma_pagamento = %s, comprovante_anexo = %s
+            WHERE id_parcela = %s;
+            """
+            cur.execute(update_query, (date.today(), forma_pagamento, comprovante_anexo, id_parcela))
+            if forma_pagamento == "Espécie":
+                descricao_transacao = f"Pagamento de parcela registrado por {username}."
+                add_cash_transaction('entrada', valor_parcela, descricao_transacao)
+            conn.commit()
+        finally:
+            conn.close()
+
+def add_cash_transaction(tipo, valor, descricao):
+    conn = create_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            insert_query = "INSERT INTO fluxo_caixa (tipo_movimentacao, valor, descricao) VALUES (%s, %s, %s);"
+            cur.execute(insert_query, (tipo, valor, descricao))
+            conn.commit()
+        finally:
+            conn.close()
+
+def get_daily_cash_report(report_date):
+    """Gera um relatório do fluxo de caixa diário, com base no saldo do dia anterior."""
+    conn = create_connection()
+    report = {}
+    if conn:
+        try:
+            cur = conn.cursor()
+            yesterday = report_date - timedelta(days=1)
+
+            cur.execute("SELECT tipo_movimentacao, valor FROM fluxo_caixa WHERE DATE(data_movimentacao) < %s;", (report_date,))
+            saldo_anterior = sum(t[1] if t[0] == 'entrada' else -t[1] for t in cur.fetchall())
+
+            cur.execute("SELECT tipo_movimentacao, valor, descricao FROM fluxo_caixa WHERE DATE(data_movimentacao) = %s;", (report_date,))
+            daily_transactions = cur.fetchall()
+            
+            total_entradas_hoje = sum(t[1] for t in daily_transactions if t[0] == 'entrada')
+            total_saidas_hoje = sum(t[1] for t in daily_transactions if t[0] == 'saida')
+            
+            saldo_final_hoje = saldo_anterior + total_entradas_hoje - total_saidas_hoje
+
+            report = {
+                "saldo_anterior": saldo_anterior,
+                "entradas_hoje": total_entradas_hoje,
+                "saidas_hoje": total_saidas_hoje,
+                "saldo_final": saldo_final_hoje,
+                "transacoes_hoje": daily_transactions
+            }
+        finally:
+            conn.close()
+    return report
+
+def get_overdue_payments():
+    conn = create_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            query = """
+            SELECT c.nome_cliente, c.cpf_cnpj, co.descricao_servico, p.valor_parcela, p.data_vencimento FROM parcelas AS p
+            JOIN contratos AS co ON p.id_contrato = co.id_contrato
+            JOIN clientes AS c ON co.id_cliente = c.id_cliente
+            WHERE p.status_pagamento = 'Pendente' AND p.data_vencimento < CURRENT_DATE
+            ORDER BY p.data_aovencimento ASC;
+            """
+            cur.execute(query)
+            return cur.fetchall()
+        finally:
+            conn.close()
+    return []
+
+# --- Funções de Geração de PDF ---
+
+def create_pdf(title, header, data):
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Adiciona o logo centralizado
+    try:
+        pdf.image(LOGO_PATH, x=80, y=5, w=50) # Posição y ajustada para o topo
+        pdf.ln(30) # Espaço para o logo
+    except Exception as e:
+        st.error(f"Erro ao carregar a imagem do logo: {e}")
+        pdf.ln(10)
+    
+    pdf.set_font("Arial", size=16)
+    pdf.cell(200, 10, txt=title, ln=1, align="C")
+    
+    pdf.set_font("Arial", size=12)
+    pdf.ln(5)
+    
+    for col in header:
+        pdf.cell(40, 10, txt=col, border=1)
+    pdf.ln()
+
+    for row in data:
+        for item in row:
+            if isinstance(item, date):
+                item = item.strftime('%d/%m/%Y')
+            elif item is None:
+                item = "N/A"
+            pdf.cell(40, 10, txt=str(item), border=1)
+        pdf.ln()
+    
+    return bytes(pdf.output(dest='S'))
+
+def generate_cash_report_pdf(report_date):
+    report = get_daily_cash_report(report_date)
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Adiciona o logo centralizado
+    try:
+        pdf.image(LOGO_PATH, x=80, y=5, w=50) # Posição y ajustada para o topo
+        pdf.ln(30) # Espaço para o logo
+    except Exception as e:
+        st.error(f"Erro ao carregar a imagem do logo: {e}")
+        pdf.ln(10)
+    
+    pdf.set_font("Arial", size=16)
+    pdf.cell(200, 10, txt="Relatório de Caixa do Dia", ln=1, align="C")
+    pdf.set_font("Arial", size=12)
+    pdf.ln(5)
+    
+    pdf.cell(200, 10, txt=f"Data: {report_date.strftime('%d/%m/%Y')}", ln=1)
+    pdf.cell(200, 10, txt=f"Saldo Inicial: R$ {report['saldo_anterior']:.2f}", ln=1)
+    pdf.cell(200, 10, txt=f"Total de Entradas: R$ {report['entradas_hoje']:.2f}", ln=1)
+    pdf.cell(200, 10, txt=f"Total de Saídas: R$ {report['saidas_hoje']:.2f}", ln=1)
+    pdf.cell(200, 10, txt=f"Saldo Final do Dia: R$ {report['saldo_final']:.2f}", ln=1)
+    
+    pdf.ln(10)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 10, txt="Transações do Dia", ln=1)
+    pdf.set_font("Arial", size=12)
+    pdf.cell(40, 10, txt="Tipo", border=1)
+    pdf.cell(40, 10, txt="Valor", border=1)
+    pdf.cell(100, 10, txt="Descrição", border=1)
+    pdf.ln()
+
+    for tipo, valor, descricao in report['transacoes_hoje']:
+        pdf.cell(40, 10, txt=tipo.capitalize(), border=1)
+        pdf.cell(40, 10, txt=f"R$ {valor:.2f}", border=1)
+        pdf.cell(100, 10, txt=descricao, border=1)
+        pdf.ln()
+
+    return bytes(pdf.output(dest='S'))
+
+# --- Módulos de Interface ---
+
+def clients_module():
+    st.header("Clientes")
+    st.info("Aqui você pode cadastrar e consultar clientes.")
+    
+    col_nav1, col_nav2 = st.columns(2)
+    with col_nav1:
+        if st.button("Cadastrar Novo Cliente", use_container_width=True):
+            st.session_state['client_action'] = 'cadastrar'
+            st.rerun()
+    with col_nav2:
+        if st.button("Consultar Cliente", use_container_width=True):
+            st.session_state['client_action'] = 'consultar'
+            st.rerun()
+
+    if 'client_action' not in st.session_state: st.session_state['client_action'] = 'cadastrar'
+    
+    if st.session_state['client_action'] == 'cadastrar':
+        st.subheader("Cadastro de Novo Cliente")
+        with st.form("client_form"):
+            nome = st.text_input("Nome completo*", placeholder="Nome completo")
+            cpf_cnpj = st.text_input("CPF/CNPJ*", placeholder="Apenas números")
+            telefone = st.text_input("Telefone", placeholder="Com DDD")
+            endereco = st.text_area("Endereço", placeholder="Rua, número, bairro, cidade")
+            observacoes = st.text_area("Informações Adicionais", placeholder="Justificativas de atraso, preferências, etc.")
+            submitted = st.form_submit_button("Salvar Cliente")
+            if submitted:
+                if not nome or not cpf_cnpj: st.warning("Por favor, preencha todos os campos obrigatórios (marcados com *).")
+                else: save_client(nome, cpf_cnpj, telefone, endereco, observacoes)
+
+    elif st.session_state['client_action'] == 'consultar':
+        st.subheader("Consulta de Clientes")
+        search_query = st.text_input("Buscar por Nome ou CPF/CNPJ")
+        if st.button("Buscar"):
+            results = get_clients(search_query)
+            if results:
+                st.subheader("Resultado da Busca")
+                st.table(results)
+            else: st.info("Nenhum cliente encontrado com a busca.")
+    
+    if st.button("Voltar ao Menu Principal"):
+        st.session_state['page'] = 'main'
+        st.session_state.pop('client_action', None)
+        st.rerun()
+
+def contracts_module():
+    st.header("Contratos")
+    st.info("Aqui você pode cadastrar novos contratos para seus clientes.")
+
+    clients = get_all_clients()
+    if not clients: st.warning("Nenhum cliente cadastrado. Por favor, cadastre um cliente primeiro."); return
+
+    client_names = {name: id for id, name in clients}
+    selected_name = st.selectbox("Selecione o Cliente*", list(client_names.keys()))
+    selected_id = client_names[selected_name]
+
+    st.subheader("Detalhes do Contrato")
+    descricao = st.text_area("Descrição do Serviço*", placeholder="Descreva o serviço do contrato")
+    tipo_contrato = st.radio("Tipo de Contrato", ["Promissória (Valor Fixo)", "Recibo (Valor Variável)"])
+    data_inicio = st.date_input("Data de Início do Contrato*", format="DD/MM/YYYY")
+
+    if tipo_contrato == "Promissória (Valor Fixo)":
+        with st.form("promissoria_form"):
+            valor_total = st.number_input("Valor Total do Serviço*", min_value=0.0, format="%.2f")
+            valor_entrada = st.number_input("Valor de Entrada (opcional)", min_value=0.0, format="%.2f")
+            valor_parcela = st.number_input("Valor de cada Parcela*", min_value=0.0, format="%.2f")
+            submitted = st.form_submit_button("Salvar Contrato")
+            if submitted:
+                if not descricao or not valor_total or not valor_parcela: st.warning("Por favor, preencha todos os campos obrigatórios (marcados com *).")
+                else:
+                    saldo = valor_total - valor_entrada
+                    num_parcelas = int(saldo / valor_parcela)
+                    ultima_parcela = saldo % valor_parcela
+                    id_contrato = save_contract(selected_id, descricao, "Promissória", valor_total, valor_entrada, valor_parcela, data_inicio)
+                    if id_contrato: save_installments(id_contrato, num_parcelas, valor_parcela, ultima_parcela, data_inicio)
+
+    elif tipo_contrato == "Recibo (Valor Variável)":
+        with st.form("recibo_form"):
+            st.info("O valor da parcela será calculado automaticamente (30% do valor do benefício).")
+            submitted = st.form_submit_button("Salvar Contrato")
+            if submitted:
+                 if not descricao: st.warning("Por favor, preencha a descrição do serviço.")
+                 else:
+                    save_contract(selected_id, descricao, "Recibo", None, None, None, data_inicio)
+                    st.success("Contrato 'Recibo' criado com sucesso.")
+    if st.button("Voltar ao Menu Principal"):
+        st.session_state['page'] = 'main'
+        st.rerun()
+
+def receipts_module():
+    st.header("Recebimentos")
+    st.info("Aqui você pode dar baixa em pagamentos de parcelas.")
+    
+    clients = get_all_clients()
+    if not clients: st.warning("Nenhum cliente cadastrado."); return
+
+    client_names = {name: id for id, name in clients}
+    selected_name = st.selectbox("1. Selecione o Cliente", list(client_names.keys()))
+    selected_id = client_names.get(selected_name)
+
+    if selected_id:
+        contracts = get_client_contracts(selected_id)
+        if not contracts: st.info("Este cliente não possui contratos cadastrados."); return
+        
+        contract_options = {f"{c[1]} (ID: {c[0]})": c[0] for c in contracts}
+        selected_contract_key = st.selectbox("2. Selecione o Contrato", list(contract_options.keys()))
+        selected_contract_id = contract_options.get(selected_contract_key)
+
+        if selected_contract_id:
+            st.subheader("3. Gerenciar Parcelas")
+            installments = get_contract_installments(selected_contract_id)
+            if not installments: st.info("Nenhuma parcela encontrada para este contrato."); return
+
+            st.write("Parcelas:")
+            for i, p in enumerate(installments):
+                id_parcela, valor, vencimento, status, forma, comprovante = p
+                col1, col2, col3, col4, col5 = st.columns(5)
+                
+                with col1: st.write(f"**Valor:** R$ {valor:.2f}")
+                with col2: st.write(f"**Vencimento:** {vencimento.strftime('%d/%m/%Y')}")
+                with col3: st.write(f"**Status:** {status}")
+
+                if status == 'Pendente':
+                    with col4:
+                        if st.button("Marcar como Pago", key=f"pay_button_{id_parcela}"):
+                            st.session_state[f'show_pay_form_{id_parcela}'] = True
+                
+                if st.session_state.get(f'show_pay_form_{id_parcela}', False):
+                    with st.form(key=f"pay_form_{id_parcela}"):
+                        st.subheader(f"Registrar Pagamento da Parcela #{id_parcela}")
+                        forma_pagamento = st.selectbox("Forma de Pagamento", ["Espécie", "Pix", "Depósito"])
+                        comprovante_anexo = st.file_uploader("Anexar Comprovante", type=['png', 'jpg', 'jpeg', 'pdf'], key=f"comprovante_{id_parcela}")
+                        submitted = st.form_submit_button("Confirmar Pagamento")
+                        if submitted:
+                            comprovante_nome = comprovante_anexo.name if comprovante_anexo else None
+                            mark_as_paid(id_parcela, forma_pagamento, comprovante_nome, valor, st.session_state['username'])
+                            st.session_state[f'show_pay_form_{id_parcela}'] = False
+                            st.rerun()
+
+    if st.button("Voltar ao Menu Principal"):
+        st.session_state['page'] = 'main'
+        st.rerun()
+
+def cash_flow_module():
+    st.header("Fluxo de Caixa")
+    st.info("Aqui você pode gerenciar entradas e saídas de caixa.")
+
+    st.subheader("Lançar Entrada")
+    with st.form("entry_form"):
+        valor_entrada = st.number_input("Valor da Entrada*", min_value=0.0, format="%.2f")
+        descricao_entrada = st.text_area("Descrição da Entrada*", placeholder="Ex: Pagamento avulso, juros, etc.")
+        submitted_entrada = st.form_submit_button("Lançar Entrada")
+        if submitted_entrada:
+            if not valor_entrada or not descricao_entrada: st.warning("Por favor, preencha todos os campos.")
+            else: add_cash_transaction('entrada', valor_entrada, descricao_entrada)
+
+    st.subheader("Lançar Despesa (Saída)")
+    with st.form("expense_form"):
+        valor_saida = st.number_input("Valor da Despesa*", min_value=0.0, format="%.2f")
+        descricao_saida = st.text_area("Descrição da Despesa*", placeholder="Ex: Pagamento de conta de luz, material de escritório...")
+        submitted_saida = st.form_submit_button("Lançar Saída")
+        if submitted_saida:
+            if not valor_saida or not descricao_saida: st.warning("Por favor, preencha todos os campos.")
+            else: add_cash_transaction('saida', valor_saida, descricao_saida)
+
+    st.subheader("Transações do Dia")
+    conn = create_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            today = date.today()
+            cur.execute("SELECT tipo_movimentacao, valor, descricao FROM fluxo_caixa WHERE DATE(data_movimentacao) = %s;", (today,))
+            transactions = cur.fetchall()
+            if transactions:
+                data_to_display = [{"Tipo": t[0].capitalize(), "Valor": f"R$ {t[1]:.2f}", "Descrição": t[2]} for t in transactions]
+                st.table(data_to_display)
+            else: st.info("Nenhuma transação registrada hoje.")
+        finally: conn.close()
+
+    if st.button("Voltar ao Menu Principal"):
+        st.session_state['page'] = 'main'
+        st.rerun()
+
+def reports_module():
+    st.header("Relatórios")
+    report_choice = st.radio("Selecione o Relatório", ["Relatório de Caixa", "Relatório de Pagamentos Atrasados"])
+
+    if report_choice == "Relatório de Caixa":
+        st.subheader("Relatório de Caixa")
+        report_date = st.date_input("Selecione a data do relatório", date.today(), format="DD/MM/YYYY")
+        
+        report = get_daily_cash_report(report_date)
+        st.write(f"**Data:** {report_date.strftime('%d/%m/%Y')}")
+        st.write(f"**Saldo Anterior:** R$ {report['saldo_anterior']:.2f}")
+        st.write(f"**Total de Entradas:** R$ {report['entradas_hoje']:.2f}")
+        st.write(f"**Total de Saídas:** R$ {report['saidas_hoje']:.2f}")
+        st.markdown(f"**<font size='+2'>Saldo Final: R$ {report['saldo_final']:.2f}</font>**", unsafe_allow_html=True)
+        
+        pdf_bytes = generate_cash_report_pdf(report_date)
+        st.download_button(
+            label="Gerar PDF",
+            data=pdf_bytes,
+            file_name=f"relatorio_caixa_{report_date.strftime('%Y-%m-%d')}.pdf",
+            mime="application/pdf"
+        )
+    
+    elif report_choice == "Relatório de Pagamentos Atrasados":
+        st.subheader("Relatório de Pagamentos Atrasados")
+        overdue_payments = get_overdue_payments()
+        if overdue_payments:
+            st.write("Os seguintes pagamentos estão atrasados:")
+            st.table(overdue_payments)
+            pdf_bytes = create_pdf("Relatório de Pagamentos Atrasados", ["Cliente", "CPF/CNPJ", "Serviço", "Valor", "Vencimento"], overdue_payments)
+            st.download_button(label="Gerar PDF", data=pdf_bytes, file_name="pagamentos_atrasados.pdf", mime="application/pdf")
+        else: st.info("Parabéns! Nenhum pagamento atrasado encontrado.")
+    
+    if st.button("Voltar ao Menu Principal"):
+        st.session_state['page'] = 'main'
+        st.rerun()
+
+
+def user_management_module():
+    st.header("Gerenciamento de Usuários")
+    st.info("Aqui você pode cadastrar novos usuários e gerenciar senhas.")
+    
+    action = st.radio("Selecione uma ação", ["Cadastrar Usuário", "Alterar Senha"])
+    
+    if action == "Cadastrar Usuário":
+        if st.session_state.get('role') != 'admin':
+            st.warning("Você não tem permissão para cadastrar novos usuários.")
+            return
+
+        st.subheader("Cadastrar Novo Usuário")
+        with st.form("register_form"):
+            new_username = st.text_input("Novo Usuário*")
+            new_password = st.text_input("Senha*", type="password")
+            confirm_password = st.text_input("Confirmar Senha*", type="password")
+            role = st.selectbox("Papel", ["user", "admin"])
+            submitted = st.form_submit_button("Cadastrar")
+
+            if submitted:
+                if not new_username or not new_password or not confirm_password: st.warning("Por favor, preencha todos os campos.")
+                elif new_password != confirm_password: st.error("As senhas não coincidem.")
+                else: register_user(new_username, new_password, role)
+    
+    elif action == "Alterar Senha":
+        st.subheader("Alterar Sua Senha")
+        with st.form("change_password_form"):
+            current_password = st.text_input("Senha Atual*", type="password")
+            new_password = st.text_input("Nova Senha*", type="password")
+            confirm_password = st.text_input("Confirmar Nova Senha*", type="password")
+            submitted = st.form_submit_button("Alterar Senha")
+            if submitted:
+                user = get_user(st.session_state['username'])
+                if user and verify_password(current_password, user[2]):
+                    if new_password == confirm_password:
+                        if update_password(st.session_state['username'], new_password): st.success("Sua senha foi alterada com sucesso!")
+                        else: st.error("Ocorreu um erro ao alterar a senha.")
+                    else: st.error("As novas senhas não coincidem.")
+                else: st.error("Senha atual incorreta.")
+
+    if st.button("Voltar ao Menu Principal"):
+        st.session_state['page'] = 'main'
+        st.rerun()
+
+# --- Estrutura da Aplicação (Main) ---
+
+def login_page():
+    st.title("Acesso ao Sistema de Controle")
+    st.markdown("Insira suas credenciais para continuar.")
+    
+    with st.form("login_form"):
+        username = st.text_input("Usuário")
+        password = st.text_input("Senha", type="password")
+        submitted = st.form_submit_button("Entrar")
+
+        if submitted:
+            user = get_user(username)
+            if user and verify_password(password, user[2]):
+                st.session_state["logged_in"] = True
+                st.session_state["username"] = user[1]
+                st.session_state["role"] = user[3]
+                st.session_state["page"] = "main"
+                st.rerun()
+            else: st.error("Usuário ou senha inválidos.")
+
+def main_menu():
+    st.sidebar.title(f"Bem-vindo(a), {st.session_state.get('username', 'Usuário')}!")
+    if st.sidebar.button("Sair"):
+        st.session_state.pop("logged_in", None)
+        st.session_state.pop("username", None)
+        st.session_state.pop("role", None)
+        st.rerun()
+    
+    st.title("Menu Principal")
+    st.markdown("Selecione uma opção abaixo para navegar entre os módulos.")
+
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("Clientes", use_container_width=True): st.session_state['page'] = 'clientes'; st.rerun()
+        if st.button("Recebimentos", use_container_width=True): st.session_state['page'] = 'recebimentos'; st.rerun()
+        if st.session_state.get('role') == 'admin':
+            if st.button("Gerenciar Usuários", use_container_width=True): st.session_state['page'] = 'users'; st.rerun()
+
+    with col2:
+        if st.button("Contratos", use_container_width=True): st.session_state['page'] = 'contratos'; st.rerun()
+        if st.button("Fluxo de Caixa", use_container_width=True): st.session_state['page'] = 'fluxo_caixa'; st.rerun()
+        if st.button("Relatórios", use_container_width=True): st.session_state['page'] = 'relatorios'; st.rerun()
+
+def main():
+    if "logged_in" not in st.session_state:
+        st.session_state["logged_in"] = False
+        st.session_state['page'] = 'login'
+
+    if 'tables_initialized' not in st.session_state:
+        conn = create_connection()
+        if conn:
+            create_initial_tables(conn)
+            conn.close()
+            st.session_state['tables_initialized'] = True
+    
+    if st.session_state["logged_in"]:
+        if st.session_state['page'] == 'main': main_menu()
+        elif st.session_state['page'] == 'clientes': clients_module()
+        elif st.session_state['page'] == 'contratos': contracts_module()
+        elif st.session_state['page'] == 'recebimentos': receipts_module()
+        elif st.session_state['page'] == 'fluxo_caixa': cash_flow_module()
+        elif st.session_state['page'] == 'relatorios': reports_module()
+        elif st.session_state['page'] == 'users': user_management_module()
+    else: login_page()
+
+
+if __name__ == "__main__":
+    main()

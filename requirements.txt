@@ -1,0 +1,5 @@
+streamlit
+psycopg2
+fpdf2
+passlib
+bcrypt
