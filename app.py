@@ -1,29 +1,57 @@
 import streamlit as st
 import psycopg2
+import pandas as pd
 from datetime import date, timedelta
 from fpdf import FPDF
 import base64
 from passlib.context import CryptContext
+import re
 
-# Estilo CSS para aprimorar a estética do menu
+# Estilo CSS para aprimorar a estética dos botões e do layout
 st.markdown("""
 <style>
-    .stButton > button {
-        width: 100%;
-        height: 100px;
-        font-size: 1.2rem;
-        border-radius: 10px;
-        border: 2px solid #D3D3D3;
-        color: #FFFFFF;
-        background-color: #4CAF50;
+    /* Estilo para os botões do menu principal - GRANDE e quadrado */
+    [data-testid="stColumn"] .stButton > button {
+        width: 200px !important;
+        height: 200px !important;
+        font-size: 1.8rem !important;
+        border-radius: 20px !important;
+        border: 2px solid #D3D3D3 !important;
+        color: #FFFFFF !important;
+        background-color: #4CAF50 !important; /* Cor verde */
         transition: all 0.3s ease;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.2);
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.2) !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        text-align: center !important;
+    }
+    [data-testid="stColumn"] .stButton > button:hover {
+        background-color: #45a049 !important; /* Um tom de verde mais escuro para o hover */
+        border-color: #45a049 !important;
+        box-shadow: 2px 2px 10px rgba(0,0,0,0.3) !important;
+    }
+    
+    /* Estilos para os botões menores, com !important para forçar a aplicação */
+    .stButton > button {
+        width: 100% !important;
+        height: 40px !important;
+        font-size: 1rem !important;
+        color: #FFFFFF !important;
+        background-color: #4CAF50 !important;
+        border-radius: 10px !important;
+        border: 1px solid #D3D3D3 !important;
+        box-shadow: none !important;
     }
     .stButton > button:hover {
-        background-color: #45a049;
-        border-color: #4CAF50;
-        box-shadow: 2px 2px 10px rgba(0,0,0,0.3);
+        background-color: #45a049 !important;
     }
+    
+    /* Ajusta o espaçamento horizontal entre as colunas do menu principal */
+    .st-emotion-cache-k7v3i5 {
+        gap: 20px;
+    }
+
     h1, h2, h3 {
         color: #333;
         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -147,7 +175,6 @@ def create_users_table_if_not_exists(conn):
     finally:
         cur.close()
 
-
 def create_initial_tables(conn):
     """Cria as tabelas do projeto se elas ainda não existirem."""
     commands = (
@@ -181,7 +208,9 @@ def create_initial_tables(conn):
             data_vencimento DATE NOT NULL,
             status_pagamento VARCHAR(20) NOT NULL,
             forma_pagamento VARCHAR(50),
-            comprovante_anexo TEXT
+            comprovante_anexo TEXT,
+            data_pagamento DATE,
+            usuario_quitacao VARCHAR(50)
         );
         """,
         """
@@ -194,7 +223,6 @@ def create_initial_tables(conn):
         );
         """
     )
-
     if conn is not None:
         try:
             cur = conn.cursor()
@@ -204,8 +232,148 @@ def create_initial_tables(conn):
             create_users_table_if_not_exists(conn)
         except psycopg2.Error as e:
             st.error(f"Erro ao criar tabelas: {e}")
+            conn.rollback()
         finally:
             cur.close()
+
+# --- Funções de formatação ---
+
+def format_cpf_cnpj(cpf_cnpj):
+    cpf_cnpj = re.sub(r'\D', '', str(cpf_cnpj))
+    if len(cpf_cnpj) == 11:
+        return f"{cpf_cnpj[:3]}.{cpf_cnpj[3:6]}.{cpf_cnpj[6:9]}-{cpf_cnpj[9:]}"
+    elif len(cpf_cnpj) == 14:
+        return f"{cpf_cnpj[:2]}.{cpf_cnpj[2:5]}.{cpf_cnpj[5:8]}/{cpf_cnpj[8:12]}-{cpf_cnpj[12:]}"
+    return cpf_cnpj
+
+def format_phone(phone):
+    phone = re.sub(r'\D', '', str(phone))
+    if len(phone) == 11:
+        return f"({phone[:2]}) {phone[2:7]}-{phone[7:]}"
+    elif len(phone) == 10:
+        return f"({phone[:2]}) {phone[2:6]}-{phone[6:]}"
+    return phone
+
+# --- Funções de interação com o banco de dados ---
+
+def save_client(nome, cpf_cnpj, telefone, endereco, observacoes):
+    """Salva um novo cliente no banco de dados."""
+    conn = create_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            insert_query = """
+            INSERT INTO clientes (nome_cliente, cpf_cnpj, telefone, endereco, informacoes_adicionais)
+            VALUES (%s, %s, %s, %s, %s);
+            """
+            cur.execute(insert_query, (nome, cpf_cnpj, telefone, endereco, observacoes))
+            conn.commit()
+            st.success("Cliente cadastrado com sucesso!")
+        except psycopg2.Error as e:
+            st.error(f"Erro ao cadastrar cliente: {e}")
+        finally:
+            conn.close()
+
+def get_clients(search_query):
+    """Busca clientes por nome ou CPF/CNPJ."""
+    conn = create_connection()
+    clients = []
+    if conn:
+        try:
+            cur = conn.cursor()
+            query = """
+            SELECT nome_cliente, cpf_cnpj, telefone, endereco
+            FROM clientes
+            WHERE nome_cliente ILIKE %s OR cpf_cnpj LIKE %s;
+            """
+            cur.execute(query, (f"%{search_query}%", f"%{search_query}%"))
+            clients = cur.fetchall()
+        finally:
+            conn.close()
+    return clients
+
+def get_all_clients():
+    """Busca todos os clientes cadastrados no banco de dados."""
+    conn = create_connection()
+    clients = []
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id_cliente, nome_cliente FROM clientes ORDER BY nome_cliente;")
+            clients = cur.fetchall()
+        finally:
+            conn.close()
+    return clients
+
+def save_contract(id_cliente, descricao, tipo, valor_total, valor_entrada, valor_parcela, data_inicio):
+    """Salva um novo contrato no banco de dados."""
+    conn = create_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            insert_query = """
+            INSERT INTO contratos (id_cliente, descricao_servico, tipo_contrato, valor_total_servico, valor_entrada, valor_parcela, data_inicio)
+            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id_contrato;
+            """
+            cur.execute(insert_query, (id_cliente, descricao, tipo, valor_total, valor_entrada, valor_parcela, data_inicio))
+            id_contrato = cur.fetchone()[0]
+            conn.commit()
+            st.success("Contrato cadastrado com sucesso!")
+            return id_contrato
+        except psycopg2.Error as e:
+            st.error(f"Erro ao cadastrar contrato: {e}")
+        finally:
+            conn.close()
+    return None
+
+def save_installments(id_contrato, num_parcelas, valor_parcela, ultima_parcela, data_inicio):
+    """Gera e salva as parcelas de um contrato no banco de dados."""
+    conn = create_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            parcela_date = data_inicio
+            for i in range(1, num_parcelas + 1):
+                parcela_date = parcela_date + timedelta(days=30)
+                insert_query = "INSERT INTO parcelas (id_contrato, valor_parcela, data_vencimento, status_pagamento) VALUES (%s, %s, %s, %s);"
+                cur.execute(insert_query, (id_contrato, valor_parcela, parcela_date, 'Pendente'))
+            
+            if ultima_parcela > 0:
+                parcela_date = parcela_date + timedelta(days=30)
+                cur.execute(insert_query, (id_contrato, ultima_parcela, parcela_date, 'Pendente'))
+            
+            conn.commit()
+            st.success("Parcelas geradas com sucesso!")
+        except psycopg2.Error as e:
+            st.error(f"Erro ao gerar parcelas: {e}")
+        finally:
+            conn.close()
+
+def get_client_contracts(client_id):
+    """Busca todos os contratos de um cliente específico."""
+    conn = create_connection()
+    contracts = []
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id_contrato, descricao_servico FROM contratos WHERE id_cliente = %s;", (client_id,))
+            contracts = cur.fetchall()
+        finally:
+            conn.close()
+    return contracts
+
+def get_contract_installments(contract_id):
+    """Busca todas as parcelas de um contrato específico."""
+    conn = create_connection()
+    installments = []
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id_parcela, valor_parcela, data_vencimento, status_pagamento, forma_pagamento, comprovante_anexo, data_pagamento, usuario_quitacao FROM parcelas WHERE id_contrato = %s ORDER BY data_vencimento ASC;", (contract_id,))
+            installments = cur.fetchall()
+        finally:
+            conn.close()
+    return installments
 
 # --- Funções do Sistema ---
 def get_user_info_by_parcela(id_parcela):
@@ -231,14 +399,17 @@ def mark_as_paid(id_parcela, forma_pagamento, comprovante_anexo, valor_parcela, 
         try:
             cur = conn.cursor()
             update_query = """
-            UPDATE parcelas SET status_pagamento = 'Pago', data_pagamento = %s, forma_pagamento = %s, comprovante_anexo = %s
+            UPDATE parcelas SET status_pagamento = 'Pago', data_pagamento = %s, forma_pagamento = %s, comprovante_anexo = %s, usuario_quitacao = %s
             WHERE id_parcela = %s;
             """
-            cur.execute(update_query, (date.today(), forma_pagamento, comprovante_anexo, id_parcela))
+            cur.execute(update_query, (date.today(), forma_pagamento, comprovante_anexo, username, id_parcela))
             if forma_pagamento == "Espécie":
                 descricao_transacao = f"Pagamento de parcela registrado por {username}."
                 add_cash_transaction('entrada', valor_parcela, descricao_transacao)
             conn.commit()
+            st.success("Pagamento registrado com sucesso!")
+        except psycopg2.Error as e:
+            st.error(f"Erro ao registrar pagamento: {e}")
         finally:
             conn.close()
 
@@ -261,10 +432,8 @@ def get_daily_cash_report(report_date):
         try:
             cur = conn.cursor()
             yesterday = report_date - timedelta(days=1)
-
             cur.execute("SELECT tipo_movimentacao, valor FROM fluxo_caixa WHERE DATE(data_movimentacao) < %s;", (report_date,))
             saldo_anterior = sum(t[1] if t[0] == 'entrada' else -t[1] for t in cur.fetchall())
-
             cur.execute("SELECT tipo_movimentacao, valor, descricao FROM fluxo_caixa WHERE DATE(data_movimentacao) = %s;", (report_date,))
             daily_transactions = cur.fetchall()
             
@@ -294,7 +463,7 @@ def get_overdue_payments():
             JOIN contratos AS co ON p.id_contrato = co.id_contrato
             JOIN clientes AS c ON co.id_cliente = c.id_cliente
             WHERE p.status_pagamento = 'Pendente' AND p.data_vencimento < CURRENT_DATE
-            ORDER BY p.data_aovencimento ASC;
+            ORDER BY p.data_vencimento ASC;
             """
             cur.execute(query)
             return cur.fetchall()
@@ -384,13 +553,20 @@ def clients_module():
     st.header("Clientes")
     st.info("Aqui você pode cadastrar e consultar clientes.")
     
+    if st.button("<- Voltar ao Menu Principal", key="voltar_btn"):
+        st.session_state['page'] = 'main'
+        st.session_state.pop('client_action', None)
+        st.rerun()
+
+    st.markdown("---")
+    
     col_nav1, col_nav2 = st.columns(2)
     with col_nav1:
-        if st.button("Cadastrar Novo Cliente", use_container_width=True):
+        if st.button("Cadastrar Novo Cliente", key="cadastrar_cliente_btn"):
             st.session_state['client_action'] = 'cadastrar'
             st.rerun()
     with col_nav2:
-        if st.button("Consultar Cliente", use_container_width=True):
+        if st.button("Consultar Cliente", key="consultar_cliente_btn"):
             st.session_state['client_action'] = 'consultar'
             st.rerun()
 
@@ -412,28 +588,39 @@ def clients_module():
     elif st.session_state['client_action'] == 'consultar':
         st.subheader("Consulta de Clientes")
         search_query = st.text_input("Buscar por Nome ou CPF/CNPJ")
-        if st.button("Buscar"):
+        if st.button("Buscar", key="buscar_btn"):
             results = get_clients(search_query)
             if results:
                 st.subheader("Resultado da Busca")
-                st.table(results)
+                # Formatando os dados antes de exibir no DataFrame
+                df_data = []
+                for row in results:
+                    df_data.append({
+                        "Nome": row[0],
+                        "CPF/CNPJ": format_cpf_cnpj(row[1]),
+                        "Telefone": format_phone(row[2]),
+                        "Endereço": row[3]
+                    })
+                df = pd.DataFrame(df_data)
+                st.dataframe(df, use_container_width=True)
             else: st.info("Nenhum cliente encontrado com a busca.")
-    
-    if st.button("Voltar ao Menu Principal"):
-        st.session_state['page'] = 'main'
-        st.session_state.pop('client_action', None)
-        st.rerun()
 
 def contracts_module():
     st.header("Contratos")
     st.info("Aqui você pode cadastrar novos contratos para seus clientes.")
+
+    if st.button("<- Voltar ao Menu Principal", key="voltar_btn"):
+        st.session_state['page'] = 'main'
+        st.rerun()
+
+    st.markdown("---")
 
     clients = get_all_clients()
     if not clients: st.warning("Nenhum cliente cadastrado. Por favor, cadastre um cliente primeiro."); return
 
     client_names = {name: id for id, name in clients}
     selected_name = st.selectbox("Selecione o Cliente*", list(client_names.keys()))
-    selected_id = client_names[selected_name]
+    selected_id = client_names.get(selected_name)
 
     st.subheader("Detalhes do Contrato")
     descricao = st.text_area("Descrição do Serviço*", placeholder="Descreva o serviço do contrato")
@@ -464,14 +651,17 @@ def contracts_module():
                  else:
                     save_contract(selected_id, descricao, "Recibo", None, None, None, data_inicio)
                     st.success("Contrato 'Recibo' criado com sucesso.")
-    if st.button("Voltar ao Menu Principal"):
-        st.session_state['page'] = 'main'
-        st.rerun()
 
 def receipts_module():
     st.header("Recebimentos")
     st.info("Aqui você pode dar baixa em pagamentos de parcelas.")
-    
+
+    if st.button("<- Voltar ao Menu Principal", key="voltar_btn"):
+        st.session_state['page'] = 'main'
+        st.rerun()
+
+    st.markdown("---")
+
     clients = get_all_clients()
     if not clients: st.warning("Nenhum cliente cadastrado."); return
 
@@ -494,8 +684,9 @@ def receipts_module():
 
             st.write("Parcelas:")
             for i, p in enumerate(installments):
-                id_parcela, valor, vencimento, status, forma, comprovante = p
-                col1, col2, col3, col4, col5 = st.columns(5)
+                id_parcela, valor, vencimento, status, forma, comprovante, data_pagamento, usuario_quitacao = p
+                
+                col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
                 
                 with col1: st.write(f"**Valor:** R$ {valor:.2f}")
                 with col2: st.write(f"**Vencimento:** {vencimento.strftime('%d/%m/%Y')}")
@@ -505,7 +696,11 @@ def receipts_module():
                     with col4:
                         if st.button("Marcar como Pago", key=f"pay_button_{id_parcela}"):
                             st.session_state[f'show_pay_form_{id_parcela}'] = True
-                
+                else:
+                    with col4:
+                        st.write(f"**Quitado em:** {data_pagamento.strftime('%d/%m/%Y')}")
+                        st.write(f"**Quitado por:** {usuario_quitacao}")
+
                 if st.session_state.get(f'show_pay_form_{id_parcela}', False):
                     with st.form(key=f"pay_form_{id_parcela}"):
                         st.subheader(f"Registrar Pagamento da Parcela #{id_parcela}")
@@ -517,14 +712,17 @@ def receipts_module():
                             mark_as_paid(id_parcela, forma_pagamento, comprovante_nome, valor, st.session_state['username'])
                             st.session_state[f'show_pay_form_{id_parcela}'] = False
                             st.rerun()
-
-    if st.button("Voltar ao Menu Principal"):
-        st.session_state['page'] = 'main'
-        st.rerun()
+                st.markdown("---")
 
 def cash_flow_module():
     st.header("Fluxo de Caixa")
     st.info("Aqui você pode gerenciar entradas e saídas de caixa.")
+
+    if st.button("<- Voltar ao Menu Principal", key="voltar_btn"):
+        st.session_state['page'] = 'main'
+        st.rerun()
+
+    st.markdown("---")
 
     st.subheader("Lançar Entrada")
     with st.form("entry_form"):
@@ -558,13 +756,16 @@ def cash_flow_module():
             else: st.info("Nenhuma transação registrada hoje.")
         finally: conn.close()
 
-    if st.button("Voltar ao Menu Principal"):
-        st.session_state['page'] = 'main'
-        st.rerun()
 
 def reports_module():
     st.header("Relatórios")
     report_choice = st.radio("Selecione o Relatório", ["Relatório de Caixa", "Relatório de Pagamentos Atrasados"])
+    
+    if st.button("<- Voltar ao Menu Principal", key="voltar_btn"):
+        st.session_state['page'] = 'main'
+        st.rerun()
+
+    st.markdown("---")
 
     if report_choice == "Relatório de Caixa":
         st.subheader("Relatório de Caixa")
@@ -574,7 +775,7 @@ def reports_module():
         st.write(f"**Data:** {report_date.strftime('%d/%m/%Y')}")
         st.write(f"**Saldo Anterior:** R$ {report['saldo_anterior']:.2f}")
         st.write(f"**Total de Entradas:** R$ {report['entradas_hoje']:.2f}")
-        st.write(f"**Total de Saídas:** R$ {report['saidas_hoje']:.2f}")
+        st.write(f"**Total de Saídas:** R$ {report['saidas_hoje']:.2f}", )
         st.markdown(f"**<font size='+2'>Saldo Final: R$ {report['saldo_final']:.2f}</font>**", unsafe_allow_html=True)
         
         pdf_bytes = generate_cash_report_pdf(report_date)
@@ -595,14 +796,15 @@ def reports_module():
             st.download_button(label="Gerar PDF", data=pdf_bytes, file_name="pagamentos_atrasados.pdf", mime="application/pdf")
         else: st.info("Parabéns! Nenhum pagamento atrasado encontrado.")
     
-    if st.button("Voltar ao Menu Principal"):
-        st.session_state['page'] = 'main'
-        st.rerun()
-
-
 def user_management_module():
     st.header("Gerenciamento de Usuários")
     st.info("Aqui você pode cadastrar novos usuários e gerenciar senhas.")
+    
+    if st.button("<- Voltar ao Menu Principal", key="voltar_btn"):
+        st.session_state['page'] = 'main'
+        st.rerun()
+    
+    st.markdown("---")
     
     action = st.radio("Selecione uma ação", ["Cadastrar Usuário", "Alterar Senha"])
     
@@ -640,10 +842,6 @@ def user_management_module():
                     else: st.error("As novas senhas não coincidem.")
                 else: st.error("Senha atual incorreta.")
 
-    if st.button("Voltar ao Menu Principal"):
-        st.session_state['page'] = 'main'
-        st.rerun()
-
 # --- Estrutura da Aplicação (Main) ---
 
 def login_page():
@@ -679,15 +877,18 @@ def main_menu():
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("Clientes", use_container_width=True): st.session_state['page'] = 'clientes'; st.rerun()
-        if st.button("Recebimentos", use_container_width=True): st.session_state['page'] = 'recebimentos'; st.rerun()
-        if st.session_state.get('role') == 'admin':
-            if st.button("Gerenciar Usuários", use_container_width=True): st.session_state['page'] = 'users'; st.rerun()
+        if st.button("Clientes", key="clientes_btn"): st.session_state['page'] = 'clientes'; st.rerun()
+        if st.button("Contratos", key="contratos_btn"): st.session_state['page'] = 'contratos'; st.rerun()
+        if st.button("Recebimentos", key="recebimentos_btn"): st.session_state['page'] = 'recebimentos'; st.rerun()
 
     with col2:
-        if st.button("Contratos", use_container_width=True): st.session_state['page'] = 'contratos'; st.rerun()
-        if st.button("Fluxo de Caixa", use_container_width=True): st.session_state['page'] = 'fluxo_caixa'; st.rerun()
-        if st.button("Relatórios", use_container_width=True): st.session_state['page'] = 'relatorios'; st.rerun()
+        if st.button("Fluxo de Caixa", key="fluxo_caixa_btn"): st.session_state['page'] = 'fluxo_caixa'; st.rerun()
+        if st.button("Relatórios", key="relatorios_btn"): st.session_state['page'] = 'relatorios'; st.rerun()
+        if st.session_state.get('role') == 'admin':
+            if st.button("Gerenciar Usuários", key="users_btn"): st.session_state['page'] = 'users'; st.rerun()
+        else:
+            # Placeholder para manter o alinhamento
+            st.markdown('<div class="stButton" style="width: 250px; height: 250px; opacity: 0; pointer-events: none;"></div>', unsafe_allow_html=True)
 
 def main():
     if "logged_in" not in st.session_state:
